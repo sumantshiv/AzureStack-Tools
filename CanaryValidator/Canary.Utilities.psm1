@@ -118,11 +118,53 @@ function Log-JSONReport
 
 function Get-CanaryResult
 {    
-    $logContent = Get-Content -Raw -Path $Global:JSONLogFile | ConvertFrom-Json
-    Log-Info ($logContent.UseCases | Format-Table -AutoSize @{Expression = {$_.Name}; Label = "Name"; Align = "Left"}, 
-                                                            @{Expression = {$_.Result}; Label="Result"; Align = "Left"}, 
-                                                            @{Expression = {((Get-Date $_.EndTime) - (Get-Date $_.StartTime)).TotalSeconds}; Label = "Duration`n[Seconds]"; Align = "Left"},
-                                                            @{Expression = {$_.Description}; Label = "Description"; Align = "Left"})                                                    
+    [CmdletBinding()]
+    param(
+        [parameter(Mandatory=$false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogFilename
+    )
+
+    if ($LogFilename)
+    {
+        $logContent = Get-Content -Raw -Path $LogFilename | ConvertFrom-Json
+    }
+    else 
+    {
+        $logContent = Get-Content -Raw -Path $Global:JSONLogFile | ConvertFrom-Json    
+    }
+    $results = @()   
+    foreach ($usecase in $logContent.UseCases)
+    {
+        $ucObj = New-Object -TypeName PSObject
+        if ([bool]($usecase.PSobject.Properties.name -match "UseCase"))
+        {
+            $ucObj | Add-Member -Type NoteProperty -Name Name -Value $usecase.Name
+            $ucObj | Add-Member -Type NoteProperty -Name Result -Value $usecase.Result
+            $ucObj | Add-Member -Type NoteProperty -Name "Duration`n[Seconds]" -Value ((Get-Date $usecase.EndTime) - (Get-Date $usecase.StartTime)).TotalSeconds     
+            $ucObj | Add-Member -Type NoteProperty -Name Description -Value $usecase.Description
+            $results += $ucObj               
+            
+            foreach ($subusecase in $usecase.UseCase)
+            {                                                                                                                                                          
+                $ucObj = New-Object -TypeName PSObject
+                $ucObj | Add-Member -Type NoteProperty -Name Name -Value ("|-- $($subusecase.Name)")
+                $ucObj | Add-Member -Type NoteProperty -Name Result -Value $subusecase.Result
+                $ucObj | Add-Member -Type NoteProperty -Name "Duration`n[Seconds]" -Value ((Get-Date $subusecase.EndTime) - (Get-Date $subusecase.StartTime)).TotalSeconds     
+                $ucObj | Add-Member -Type NoteProperty -Name Description -Value ("|-- $($subusecase.Description)")
+                $results += $ucObj  
+            }
+        }
+        else
+        {
+            $ucObj | Add-Member -Type NoteProperty -Name Name -Value $usecase.Name
+            $ucObj | Add-Member -Type NoteProperty -Name Result -Value $usecase.Result
+            $ucObj | Add-Member -Type NoteProperty -Name "Duration`n[Seconds]" -Value ((Get-Date $usecase.EndTime) - (Get-Date $usecase.StartTime)).TotalSeconds     
+            $ucObj | Add-Member -Type NoteProperty -Name Description -Value $usecase.Description   
+            $results += $ucObj
+        }
+    }   
+    Log-Info($results | Format-Table -AutoSize)                                               
 }
 
 function Get-CanaryLonghaulResult
@@ -149,6 +191,16 @@ function Get-CanaryLonghaulResult
                                             @{Expression={[math]::Round(($_.Group | Where-Object Result -eq "PASS" | ForEach-Object {((Get-Date $_.EndTime) - (Get-Date $_.StartTime)).TotalMilliseconds} | Measure-Object -Average).Average, 0)};Label="AvgTime`n[msecs]"; Align = "Left"},
                                             @{Expression={$pCount = ($_.Group | Where-Object Result -eq "PASS").Count; $times = ($_.Group | Where-Object Result -eq "PASS" | ForEach-Object {((Get-Date $_.EndTime) - (Get-Date $_.StartTime)).TotalMilliseconds}); $avgTime = ($times | Measure-Object -Average).Average; $sd = 0; foreach ($time in $times){$sd += [math]::Pow(($time - $avgTime), 2)}; [math]::Round([math]::Sqrt($sd/$pCount), 0)};Label="StdDev"; Align = "Left"},
                                             @{Expression={$pCount = ($_.Group | Where-Object Result -eq "PASS").Count; $times = ($_.Group | Where-Object Result -eq "PASS" | ForEach-Object {((Get-Date $_.EndTime) - (Get-Date $_.StartTime)).TotalMilliseconds}); $avgTime = ($times | Measure-Object -Average).Average; $sd = 0; foreach ($time in $times){$sd += [math]::Pow(($time - $avgTime), 2)}; [math]::Round(([math]::Round([math]::Sqrt($sd/$pCount), 0)/$avgTime), 0) * 100};Label="RelativeStdDev`n[Goal: <50%]"; Align = "Left"}
+}
+
+function Get-CanaryFailureStatus
+{
+    $logContent = Get-Content -Raw -Path $Global:JSONLogFile | ConvertFrom-Json
+    if ($logContent.Usecases.Result -contains "FAIL")
+    {
+        return $true
+    }
+    return $false
 }
 
 function Start-Scenario
@@ -239,7 +291,7 @@ function Invoke-Usecase
         $parentUsecase = $Name
         if ((Get-PSCallStack)[1].Arguments.Contains($parentUsecase))
         {
-            "  `t"*([math]::Floor((Get-PSCallStack).Count/3)) + "|--" + $Name
+            "  `t"*([math]::Floor((Get-PSCallStack).Count/3)) + "|-- " + $Name
         }
         else
         {
@@ -248,7 +300,8 @@ function Invoke-Usecase
         }
         if ($UsecaseBlock.ToString().Contains("Invoke-Usecase"))
         {
-            Invoke-Command -ScriptBlock $UsecaseBlock -ErrorAction SilentlyContinue
+            try {Invoke-Command -ScriptBlock $UsecaseBlock -ErrorAction SilentlyContinue}
+            catch {}
         }
         return
     }
